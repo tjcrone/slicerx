@@ -988,8 +988,13 @@ pub(crate) fn calendar(cfg: &PrintConfig) -> [f64; 6] {
         Some((t, offset)) => t + i64::from(offset) * 60,
         None => clock,
     };
+    #[allow(clippy::cast_precision_loss, reason = "calendar fields are small")]
+    civil(secs).map(|v| v as f64)
+}
+
+/// Year, month, day, hour, minute and second of `secs` since 1970-01-01 (Howard Hinnant's algorithm).
+pub(crate) fn civil(secs: i64) -> [i64; 6] {
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -999,8 +1004,7 @@ pub(crate) fn calendar(cfg: &PrintConfig) -> [f64; 6] {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
-    #[allow(clippy::cast_precision_loss, reason = "calendar fields are small")]
-    [year, month, day, rem / 3600, rem % 3600 / 60, rem % 60].map(|v| v as f64)
+    [year, month, day, rem / 3600, rem % 3600 / 60, rem % 60]
 }
 
 /// Variables Orca's `GCode::_do_export` sets from the plate and the print (`GCode.cpp`, the block that
