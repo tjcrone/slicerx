@@ -11386,6 +11386,17 @@ impl SliceSession {
                     continue;
                 };
                 let region = surface_region(which);
+                // Concentric internal solid infill is the band's variable-width beads, as a narrow band's are: the
+                // loops grown from its two edges meet in the middle without a slot or a ridge, which fixed-width
+                // loops a spacing apart leave wherever the band is not a whole number of spacings wide.
+                if which == 2 && curve == crate::surface::Curve::Concentric {
+                    let beads = crate::narrow::concentric_lines(&region, cfg, surface_mm, layer_height);
+                    if !beads.is_empty() {
+                        spans.clear();
+                        work.shell_thick.extend(beads);
+                        continue;
+                    }
+                }
                 let lines = crate::surface::fill(
                     &region,
                     curve,

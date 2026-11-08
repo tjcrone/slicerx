@@ -500,3 +500,132 @@ fn more_top_layers_print_a_wider_band() {
         "{four:.1} mm with 4 top layers, {five:.1} with 5"
     );
 }
+
+/// A tube of radii `r0` to `r1` mm and `h` mm tall, centered on the plate, 96 sides.
+fn tube(r0: f32, r1: f32, h: f32) -> Shape {
+    const SIDES: u32 = 96;
+    let mut positions = Vec::new();
+    // Rings: inner bottom, outer bottom, outer top, inner top.
+    for (r, z) in [(r0, 0.0), (r1, 0.0), (r1, h), (r0, h)] {
+        for i in 0..SIDES {
+            let a = std::f32::consts::TAU * i as f32 / SIDES as f32;
+            positions.push([128.0 + r * a.cos(), 128.0 + r * a.sin(), z]);
+        }
+    }
+    let at = |ring: u32, i: u32| ring * SIDES + i % SIDES;
+    let mut triangles = Vec::new();
+    // Each band joins ring k to ring k + 1 (and the last to the first): bottom, outside, top, inside, facing out.
+    for k in 0..4u32 {
+        let n = (k + 1) % 4;
+        for i in 0..SIDES {
+            triangles.push([at(k, i), at(k, i + 1), at(n, i + 1)]);
+            triangles.push([at(k, i), at(n, i + 1), at(n, i)]);
+        }
+    }
+    (positions, triangles)
+}
+
+/// The rings of walls and internal solid infill on `layer` (counted from 0), each as (radius about the part's
+/// center, width, feature), inside out: the extruding moves' end points grouped by radius, so rings the fill chains
+/// together still count one by one, and the short links between them (a few points) are left out.
+fn rings_at(g: &str, layer: u32) -> Vec<(f64, f64, String)> {
+    let (mut at, mut started, mut feature, mut width) = (0u32, false, String::new(), 0.0);
+    let mut raw: Vec<(f64, f64, f64, String)> = Vec::new();
+    for line in g.lines() {
+        if line.starts_with("; CHANGE_LAYER") || line.starts_with(";LAYER_CHANGE") {
+            if started {
+                at += 1;
+            }
+            started = true;
+        }
+        if let Some(f) = line
+            .strip_prefix("; FEATURE: ")
+            .or_else(|| line.strip_prefix(";TYPE:"))
+        {
+            f.trim().clone_into(&mut feature);
+            continue;
+        }
+        if let Some(w) = line
+            .strip_prefix("; LINE_WIDTH: ")
+            .or_else(|| line.strip_prefix(";WIDTH:"))
+        {
+            width = w.trim().parse().unwrap_or(width);
+            continue;
+        }
+        let code = line.split(';').next().unwrap_or("");
+        if at != layer || !(feature.contains("wall") || feature == SOLID) {
+            continue;
+        }
+        // Arc fitting is off: an arc here is a spiral lift on a travel.
+        if !code.starts_with("G1 ") {
+            continue;
+        }
+        let word = |c: char| {
+            code.split_whitespace()
+                .find_map(|w| w.strip_prefix(c).and_then(|v| v.parse::<f64>().ok()))
+        };
+        if let (Some(x), Some(y), Some(_)) = (word('X'), word('Y'), word('E').filter(|e| *e > 0.0)) {
+            raw.push((x, y, width, feature.clone()));
+        }
+    }
+    // The part's center: the middle of the layer's box, wherever the plate put it.
+    let (lo, hi) = raw.iter().fold(([f64::MAX; 2], [f64::MIN; 2]), |(lo, hi), p| {
+        ([lo[0].min(p.0), lo[1].min(p.1)], [hi[0].max(p.0), hi[1].max(p.1)])
+    });
+    let (cx, cy) = ((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0);
+    let mut points: Vec<(f64, f64, String)> = raw
+        .into_iter()
+        .map(|(x, y, w, f)| ((x - cx).hypot(y - cy), w, f))
+        .collect();
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut rings: Vec<Vec<(f64, f64, String)>> = Vec::new();
+    for p in points {
+        match rings.last_mut() {
+            Some(ring) if ring.last().is_some_and(|q| p.0 - q.0 < 0.03) => ring.push(p),
+            _ => rings.push(vec![p]),
+        }
+    }
+    rings
+        .into_iter()
+        .filter(|ring| ring.len() >= 24)
+        .map(|ring| {
+            let (r, w) = ring.iter().fold((0.0, 0.0), |(r, w), p| (r + p.0, w + p.1));
+            let n = ring.len() as f64;
+            (r / n, w / n, ring[0].2.clone())
+        })
+        .collect()
+}
+
+/// Concentric internal solid infill fills a band between walls evenly: where the loops grown from its two edges
+/// meet, they neither leave a slot between them nor pile onto each other: every neighboring pair of infill beads
+/// overlaps a little, as two walls do.
+#[test]
+fn concentric_internal_solid_meets_in_the_middle_without_a_slot_or_a_ridge() {
+    for (r0, r1) in [(3.0, 7.0), (3.0, 7.2), (3.0, 7.4), (8.8, 17.0)] {
+        let config = settings(&narrow_off(&json!({
+            "gcode_flavor": "klipper", "enable_arc_fitting": false, "wall_loops": 2, "wall_generator": "classic",
+            "sparse_infill_density": "100%", "internal_solid_infill_pattern": "concentric",
+            "top_shell_layers": 3, "bottom_shell_layers": 3,
+        })));
+        let (g, _) = slice(tube(r0, r1, 6.0), &config);
+        let rings = rings_at(&g, 15);
+        let overlaps: Vec<f64> = rings
+            .windows(2)
+            .map(|w| (w[1].0 - w[0].0) - (w[0].1 + w[1].1) / 2.0)
+            .collect();
+        assert!(rings.len() > 4, "tube {r0}..{r1}: {rings:?}");
+        // Between infill and a wall the overlap is `infill_wall_overlap`'s; this is about infill against infill.
+        for (pair, o) in rings
+            .windows(2)
+            .zip(&overlaps)
+            .filter(|(p, _)| p.iter().all(|r| r.2 == SOLID))
+        {
+            assert!(
+                *o <= 0.01 && *o >= -0.1,
+                "tube {r0}..{r1}: {o:+.3} mm between {:?} and {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+}
