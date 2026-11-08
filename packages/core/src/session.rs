@@ -10427,7 +10427,14 @@ impl SliceSession {
                 Some(serde_json::Value::String(s)) => s.as_str(),
                 _ => "monotonic",
             };
+            // Concentric internal solid fills narrow bands with variable-width beads itself
+            // (`narrow::solid_concentric_lines`): on printers other than Bambu Lab's, whose split works inside a
+            // piece (`narrow::split_core`), the split would only cut slivers off a curved band's edge. Bambu Lab
+            // printers split per piece and keep it: their narrow pieces can print as floating vertical shell.
+            let concentric = crate::surface::curve(solid_name) == Some(crate::surface::Curve::Concentric)
+                && !crate::firmware::bambu_printer(cfg, cfg.gcode_flavor);
             if crate::tower::flag_or(cfg, "detect_narrow_internal_solid_infill", true)
+                && !concentric
                 && !shell_area.is_empty()
             {
                 // Bambu Lab printers decide per connected piece (`narrow::split_pieces`); the others split inside a
@@ -11390,7 +11397,7 @@ impl SliceSession {
                 // loops grown from its two edges meet in the middle without a slot or a ridge, which fixed-width
                 // loops a spacing apart leave wherever the band is not a whole number of spacings wide.
                 if which == 2 && curve == crate::surface::Curve::Concentric {
-                    let beads = crate::narrow::concentric_lines(&region, cfg, surface_mm, layer_height);
+                    let beads = crate::narrow::solid_concentric_lines(&region, cfg, surface_mm, layer_height);
                     if !beads.is_empty() {
                         spans.clear();
                         work.shell_thick.extend(beads);

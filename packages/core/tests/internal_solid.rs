@@ -503,26 +503,103 @@ fn more_top_layers_print_a_wider_band() {
 
 /// A tube of radii `r0` to `r1` mm and `h` mm tall, centered on the plate, 96 sides.
 fn tube(r0: f32, r1: f32, h: f32) -> Shape {
-    const SIDES: u32 = 96;
+    tube_sides(r0, 96, r1, 96, h)
+}
+
+/// A tube of radii `r0` (`n0` sides) to `r1` (`n1` sides) mm and `h` mm tall, centered on the plate. A CAD
+/// mesher gives a hole fewer sides than the outside it is in.
+fn tube_sides(r0: f32, n0: u32, r1: f32, n1: u32, h: f32) -> Shape {
     let mut positions = Vec::new();
-    // Rings: inner bottom, outer bottom, outer top, inner top.
-    for (r, z) in [(r0, 0.0), (r1, 0.0), (r1, h), (r0, h)] {
-        for i in 0..SIDES {
-            let a = std::f32::consts::TAU * i as f32 / SIDES as f32;
+    let mut ring = |r: f32, n: u32, z: f32| -> Vec<u32> {
+        let first = positions.len() as u32;
+        for i in 0..n {
+            let a = std::f32::consts::TAU * i as f32 / n as f32;
             positions.push([128.0 + r * a.cos(), 128.0 + r * a.sin(), z]);
         }
-    }
-    let at = |ring: u32, i: u32| ring * SIDES + i % SIDES;
+        (first..first + n).collect()
+    };
+    let (inner_bottom, outer_bottom) = (ring(r0, n0, 0.0), ring(r1, n1, 0.0));
+    let (outer_top, inner_top) = (ring(r1, n1, h), ring(r0, n0, h));
     let mut triangles = Vec::new();
-    // Each band joins ring k to ring k + 1 (and the last to the first): bottom, outside, top, inside, facing out.
-    for k in 0..4u32 {
-        let n = (k + 1) % 4;
-        for i in 0..SIDES {
-            triangles.push([at(k, i), at(k, i + 1), at(n, i + 1)]);
-            triangles.push([at(k, i), at(n, i + 1), at(n, i)]);
+    // The sides, facing out of the material: the outside outward, the hole inward.
+    for (lo, hi, outside) in [
+        (&outer_bottom, &outer_top, true),
+        (&inner_bottom, &inner_top, false),
+    ] {
+        let n = lo.len();
+        for i in 0..n {
+            let j = (i + 1) % n;
+            if outside {
+                triangles.push([lo[i], lo[j], hi[j]]);
+                triangles.push([lo[i], hi[j], hi[i]]);
+            } else {
+                triangles.push([lo[i], hi[j], lo[j]]);
+                triangles.push([lo[i], hi[i], hi[j]]);
+            }
+        }
+    }
+    // The bottom and top rings, joined by walking both edges by angle, facing down and up.
+    for (inner, outer, up) in [
+        (&inner_bottom, &outer_bottom, false),
+        (&inner_top, &outer_top, true),
+    ] {
+        let (ni, no) = (inner.len(), outer.len());
+        let (mut i, mut o) = (0, 0);
+        while i < ni || o < no {
+            let inner_next = (i + 1) as f64 / ni as f64 <= (o + 1) as f64 / no as f64;
+            let t = if (inner_next && i < ni) || o >= no {
+                i += 1;
+                [inner[(i - 1) % ni], inner[i % ni], outer[o % no]]
+            } else {
+                o += 1;
+                [inner[i % ni], outer[o % no], outer[(o - 1) % no]]
+            };
+            triangles.push(if up { t } else { [t[0], t[2], t[1]] });
         }
     }
     (positions, triangles)
+}
+
+/// How many separate extrusions the internal solid infill of `layer` (counted from 0) prints in.
+fn solid_runs(g: &str, layer: u32) -> usize {
+    let (mut at, mut started, mut feature, mut runs, mut open) = (0u32, false, String::new(), 0, false);
+    for line in g.lines() {
+        if line.starts_with("; CHANGE_LAYER") || line.starts_with(";LAYER_CHANGE") {
+            if started {
+                at += 1;
+            }
+            started = true;
+            open = false;
+        }
+        if let Some(f) = line
+            .strip_prefix("; FEATURE: ")
+            .or_else(|| line.strip_prefix(";TYPE:"))
+        {
+            f.trim().clone_into(&mut feature);
+            open = false;
+            continue;
+        }
+        let code = line.split(';').next().unwrap_or("");
+        if !code.starts_with("G1 ") {
+            continue;
+        }
+        let moves = code
+            .split_whitespace()
+            .any(|w| w.starts_with('X') || w.starts_with('Y'));
+        let extrudes = code
+            .split_whitespace()
+            .find_map(|w| w.strip_prefix('E').and_then(|v| v.parse::<f64>().ok()))
+            .is_some_and(|e| e > 0.0);
+        if at == layer && moves && extrudes && feature == SOLID {
+            if !open {
+                runs += 1;
+                open = true;
+            }
+        } else if moves {
+            open = false;
+        }
+    }
+    runs
 }
 
 /// The rings of walls and internal solid infill on `layer` (counted from 0), each as (radius about the part's
@@ -598,7 +675,7 @@ fn rings_at(g: &str, layer: u32) -> Vec<(f64, f64, String)> {
 
 /// Concentric internal solid infill fills a band between walls evenly: where the loops grown from its two edges
 /// meet, they neither leave a slot between them nor pile onto each other: every neighboring pair of infill beads
-/// overlaps a little, as two walls do.
+/// overlaps a little, as two walls do, and no bead takes the whole leftover.
 #[test]
 fn concentric_internal_solid_meets_in_the_middle_without_a_slot_or_a_ridge() {
     for (r0, r1) in [(3.0, 7.0), (3.0, 7.2), (3.0, 7.4), (8.8, 17.0)] {
@@ -614,6 +691,18 @@ fn concentric_internal_solid_meets_in_the_middle_without_a_slot_or_a_ridge() {
             .map(|w| (w[1].0 - w[0].0) - (w[0].1 + w[1].1) / 2.0)
             .collect();
         assert!(rings.len() > 4, "tube {r0}..{r1}: {rings:?}");
+        // The leftover is spread over several beads, not put into one too wide for the nozzle: no bead past a
+        // quarter wider than the infill's own width.
+        let widths: Vec<f64> = rings.iter().filter(|r| r.2 == SOLID).map(|r| r.1).collect();
+        let mut sorted = widths.clone();
+        sorted.sort_by(f64::total_cmp);
+        let usual = sorted[sorted.len() / 2];
+        for w in &widths {
+            assert!(
+                *w <= usual * 1.25,
+                "tube {r0}..{r1}: a bead {w:.3} mm wide where the infill is {usual:.3}: {rings:?}"
+            );
+        }
         // Between infill and a wall the overlap is `infill_wall_overlap`'s; this is about infill against infill.
         for (pair, o) in rings
             .windows(2)
@@ -628,4 +717,41 @@ fn concentric_internal_solid_meets_in_the_middle_without_a_slot_or_a_ridge() {
             );
         }
     }
+}
+
+/// Concentric internal solid infill fills narrow bands with variable-width beads itself, so the narrow split has
+/// nothing to add: on a printer other than Bambu Lab's it cut slivers off a curved band's edge, which printed as
+/// broken pieces of the middle rings (on a tube whose hole has fewer sides than its outside, as a CAD mesher
+/// makes it). With concentric internal solid, `detect_narrow_internal_solid_infill` changes nothing there.
+#[test]
+fn narrow_detection_leaves_concentric_internal_solid_alone() {
+    let slice_with = |narrow: bool| {
+        let config = settings(&json!({
+            "gcode_flavor": "klipper", "printer_model": "Generic Klipper Printer", "enable_arc_fitting": false,
+            "wall_loops": 2, "wall_generator": "classic", "sparse_infill_density": "100%",
+            "internal_solid_infill_pattern": "concentric", "top_shell_layers": 3, "bottom_shell_layers": 3,
+            "detect_narrow_internal_solid_infill": narrow,
+        }));
+        let (g, r) = slice(tube_sides(3.0, 64, 7.0, 200, 6.0), &config);
+        (solid_runs(&g, 15), rings_at(&g, 15), r.total(SOLID))
+    };
+    let (on, off) = (slice_with(true), slice_with(false));
+    assert_eq!(
+        on.0, 1,
+        "the layer's internal solid infill prints in {} pieces",
+        on.0
+    );
+    assert_eq!(on.1.len(), off.1.len(), "on {:?}, off {:?}", on.1, off.1);
+    for (a, b) in on.1.iter().zip(&off.1) {
+        assert!(
+            (a.0 - b.0).abs() < 0.002 && (a.1 - b.1).abs() < 0.002,
+            "on {a:?}, off {b:?}"
+        );
+    }
+    assert!(
+        (on.2 - off.2).abs() < 0.01,
+        "internal solid filament: on {} mm, off {} mm",
+        on.2,
+        off.2
+    );
 }

@@ -545,12 +545,43 @@ pub(crate) fn concentric_lines(
         .collect()
 }
 
+/// The concentric fill of a whole solid region (concentric internal solid infill): [`concentric_lines`], with the
+/// leftover where the loops from the region's edges meet spread over the middle beads ([`SPREAD_BEADS`] of them)
+/// instead of put into one, which on a band a little over a whole number of spacings wide came out half again
+/// as wide as the rest.
+pub(crate) fn solid_concentric_lines(
+    region: &Shapes,
+    cfg: &crate::config::PrintConfig,
+    spacing_mm: f64,
+    layer_height: f64,
+) -> Vec<crate::arachne::WallLine> {
+    let clip = loop_clipping(cfg);
+    spread_beads(region, cfg, spacing_mm, layer_height, SPREAD_BEADS)
+        .into_iter()
+        .flat_map(|w| order_band(w, clip))
+        .collect()
+}
+
+/// How many middle beads of a concentric solid fill share its leftover width ([`solid_concentric_lines`]).
+const SPREAD_BEADS: i64 = 4;
+
 /// The variable-width beads that fill each piece of a narrow region to its middle, one list per piece, unordered.
 pub(crate) fn concentric_beads(
     narrow: &Shapes,
     cfg: &crate::config::PrintConfig,
     spacing_mm: f64,
     layer_height: f64,
+) -> Vec<Vec<crate::arachne::WallLine>> {
+    spread_beads(narrow, cfg, spacing_mm, layer_height, 1)
+}
+
+/// [`concentric_beads`] with the width a band leaves over shared by `spread` middle beads.
+fn spread_beads(
+    narrow: &Shapes,
+    cfg: &crate::config::PrintConfig,
+    spacing_mm: f64,
+    layer_height: f64,
+    spread: i64,
 ) -> Vec<Vec<crate::arachne::WallLine>> {
     let Some(b) = perimeters::bounds(narrow) else {
         return Vec::new();
@@ -575,7 +606,7 @@ pub(crate) fn concentric_beads(
         wall_transition_length: 40.0 / nozzle.max(0.01),
         wall_transition_filter_deviation: 25.0,
         wall_transition_angle: 10.0,
-        wall_distribution_count: 1,
+        wall_distribution_count: spread,
         ..crate::arachne::Params::default()
     };
     let mut out = Vec::new();
