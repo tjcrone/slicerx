@@ -11393,14 +11393,21 @@ impl SliceSession {
                     continue;
                 };
                 let region = surface_region(which);
-                // Concentric internal solid infill is the band's variable-width beads, as a narrow band's are: the
-                // loops grown from its two edges meet in the middle without a slot or a ridge, which fixed-width
-                // loops a spacing apart leave wherever the band is not a whole number of spacings wide.
-                if which == 2 && curve == crate::surface::Curve::Concentric {
+                // A concentric surface (top, bottom or internal solid) is the band's variable-width beads, as a narrow
+                // band's are: the loops grown from its two edges meet in the middle without a slot or a ridge, which
+                // fixed-width loops a spacing apart leave wherever the band is not a whole number of spacings wide.
+                // Each surface keeps its own spacing, feature, speed and order.
+                if curve == crate::surface::Curve::Concentric {
                     let beads = crate::narrow::solid_concentric_lines(&region, cfg, surface_mm, layer_height);
-                    if !beads.is_empty() {
+                    let slot = match which {
+                        0 => Some(&mut work.top_thick),
+                        1 => Some(&mut work.bottom_thick),
+                        2 => Some(&mut work.shell_thick),
+                        _ => None,
+                    };
+                    if let (false, Some(slot)) = (beads.is_empty(), slot) {
                         spans.clear();
-                        work.shell_thick.extend(beads);
+                        slot.extend(beads);
                         continue;
                     }
                 }
@@ -14348,6 +14355,7 @@ fn split_by_feature(work: ToolWork, t: FeatureTools) -> Vec<ToolWork> {
         internal_bridge_path_widths,
         top,
         top_widen,
+        top_thick,
         bridge,
         bridge_paths,
         bridge_path_widths,
@@ -14442,11 +14450,12 @@ fn split_by_feature(work: ToolWork, t: FeatureTools) -> Vec<ToolWork> {
             w.bridge_paths.extend(bridge_paths);
         }
     }
-    if !(top.is_empty() && gap_top.is_empty()) {
+    if !(top.is_empty() && top_thick.is_empty() && gap_top.is_empty()) {
         let k = at(&mut out, t.top);
         if let Some(w) = out.get_mut(k) {
             w.top.extend(top);
             w.top_widen.extend(top_widen);
+            w.top_thick.extend(top_thick);
             w.region_top.extend(region_top);
             w.gap_top.extend(gap_top);
         }

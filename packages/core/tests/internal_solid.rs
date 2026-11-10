@@ -25,6 +25,8 @@ use sx_core::api::{self, Mesh, MeshPart, SliceRequest};
 type Shape = (Vec<[f32; 3]>, Vec<[u32; 3]>);
 
 const SOLID: &str = "Internal solid infill";
+const TOP: &str = "Top surface";
+const BOTTOM: &str = "Bottom surface";
 const FLOATING: &str = "Floating vertical shell";
 
 fn read(path: &str) -> Value {
@@ -606,6 +608,11 @@ fn solid_runs(g: &str, layer: u32) -> usize {
 /// center, width, feature), inside out: the extruding moves' end points grouped by radius, so rings the fill chains
 /// together still count one by one, and the short links between them (a few points) are left out.
 fn rings_at(g: &str, layer: u32) -> Vec<(f64, f64, String)> {
+    rings_of(g, layer, SOLID)
+}
+
+/// [`rings_at`] for the walls and the fill feature `fill` (internal solid, top or bottom surface).
+fn rings_of(g: &str, layer: u32, fill: &str) -> Vec<(f64, f64, String)> {
     let (mut at, mut started, mut feature, mut width) = (0u32, false, String::new(), 0.0);
     let mut raw: Vec<(f64, f64, f64, String)> = Vec::new();
     for line in g.lines() {
@@ -630,7 +637,7 @@ fn rings_at(g: &str, layer: u32) -> Vec<(f64, f64, String)> {
             continue;
         }
         let code = line.split(';').next().unwrap_or("");
-        if at != layer || !(feature.contains("wall") || feature == SOLID) {
+        if at != layer || !(feature.contains("wall") || feature == fill) {
             continue;
         }
         // Arc fitting is off: an arc here is a spiral lift on a travel.
@@ -754,4 +761,44 @@ fn narrow_detection_leaves_concentric_internal_solid_alone() {
         on.2,
         off.2
     );
+}
+
+/// How many layers the G-code has.
+fn layer_count(g: &str) -> u32 {
+    let changes = g
+        .lines()
+        .filter(|l| l.starts_with("; CHANGE_LAYER") || l.starts_with(";LAYER_CHANGE"))
+        .count();
+    u32::try_from(changes).unwrap_or(0)
+}
+
+/// Concentric top and bottom surfaces meet in the middle of their band as concentric internal solid infill does:
+/// the loops grown from the band's two edges neither leave a slot between them nor pile onto each other, on the
+/// first layer's bottom surface and on the last layer's top surface alike, and each keeps its own feature.
+#[test]
+fn concentric_top_and_bottom_surfaces_meet_in_the_middle_without_a_slot() {
+    for (r0, r1) in [(3.0, 7.0), (3.0, 7.2), (3.0, 7.4), (8.8, 17.0)] {
+        let config = settings(&narrow_off(&json!({
+            "gcode_flavor": "klipper", "enable_arc_fitting": false, "wall_loops": 2, "wall_generator": "classic",
+            "sparse_infill_density": "100%", "internal_solid_infill_pattern": "concentric",
+            "top_surface_pattern": "concentric", "bottom_surface_pattern": "concentric",
+            "top_shell_layers": 3, "bottom_shell_layers": 3,
+        })));
+        let (g, _) = slice(tube(r0, r1, 6.0), &config);
+        let last = layer_count(&g).saturating_sub(1);
+        for (layer, fill) in [(0, BOTTOM), (last, TOP)] {
+            let rings = rings_of(&g, layer, fill);
+            let beads = rings.iter().filter(|r| r.2 == fill).count();
+            assert!(beads > 2, "tube {r0}..{r1}, layer {layer}: {rings:?}");
+            for pair in rings.windows(2).filter(|p| p.iter().all(|r| r.2 == fill)) {
+                let o = (pair[1].0 - pair[0].0) - (pair[0].1 + pair[1].1) / 2.0;
+                assert!(
+                    o <= 0.01 && o >= -0.1,
+                    "tube {r0}..{r1}, layer {layer}: {o:+.3} mm between {:?} and {:?}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+        }
+    }
 }

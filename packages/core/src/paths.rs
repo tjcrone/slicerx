@@ -121,6 +121,9 @@ pub(crate) struct ToolWork {
     /// How much wider than the top surface's own width (mm) each of `top` prints, as `bottom_widen` is for the
     /// bottom surface.
     pub(crate) top_widen: Vec<f32>,
+    /// Concentric top surface, as variable-width beads (`narrow::solid_concentric_lines`) instead of fixed-width
+    /// loops, so the loops grown from the surface's edges meet without a slot.
+    pub(crate) top_thick: Vec<crate::arachne::WallLine>,
     /// Bridge strands over air, printed with round strands of `bridge_width`.
     pub(crate) bridge: Vec<[Point; 2]>,
     /// Bridge strands joined along the walls.
@@ -2742,6 +2745,9 @@ pub(crate) fn plan_layer_paths(
             &w.top,
             &w.top_widen,
         );
+        for l in &w.top_thick {
+            b.push_thick(w.tool, Feature::TopSurface, speeds.top, &l.points, &l.widths);
+        }
         b.push_gaps(w.tool, fill_gap_speed(cfg, layer, speeds.inner), &w.gap_top);
         b.width_mm = base_width;
         groups.push(Group {
